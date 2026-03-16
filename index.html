@@ -2026,36 +2026,32 @@ async function loadLiveData(){
   const marketStatus = test.marketOpen === false ? ' (market closed — using last price)' : '';
   toast('API Key Valid ✓', `EUR/USD: ${test.price}${marketStatus}`, 'var(--green)');
 
-  // ── Step 2: Fetch all quotes ───────────────────────
+  // ── Step 2: Fetch quotes sequentially (avoid rate limit) ─
   const mappedMarkets = S.markets.filter(m => FINNHUB_MAP[m.sym.id]);
   let loaded = 0;
 
-  await Promise.all(mappedMarkets.map(async m => {
+  for(const m of mappedMarkets){
     const q = await fetchFinnhubQuote(m.sym.id);
-    if(!q) return;
-
-    // Anchor sim OHLC history to real price, replace last bar
-    const scale  = q.price / (m.ohlc.at(-1)?.c || q.price);
-    const ohlc   = m.ohlc.map(bar => ({
-      o:bar.o*scale, h:bar.h*scale, l:bar.l*scale, c:bar.c*scale, v:bar.v
-    }));
-    // Replace the last bar with real OHLH data
-    ohlc[ohlc.length-1] = {
-      o: q.open, h: q.high, l: q.low, c: q.price, v: 500000
-    };
-    m.sym  = {...m.sym, base: q.price};
-    m.ohlc = ohlc;
-    m.price  = q.price;
-    m.chgPct = q.prevClose > 0
-      ? (q.price - q.prevClose) / q.prevClose * 100
-      : m.chgPct;
-    const edge = calcEdge(m.sym, ohlc);
-    edge.smoothedScore   = edge.score;
-    edge.smoothedSignals = {...edge.signals};
-    edge.isLive = true;
-    m.edge = edge;
-    loaded++;
-  }));
+    if(q){
+      const scale = q.price / (m.ohlc.at(-1)?.c || q.price);
+      const ohlc  = m.ohlc.map(bar => ({
+        o:bar.o*scale, h:bar.h*scale, l:bar.l*scale, c:bar.c*scale, v:bar.v
+      }));
+      ohlc[ohlc.length-1] = { o:q.open, h:q.high, l:q.low, c:q.price, v:500000 };
+      m.sym    = {...m.sym, base:q.price};
+      m.ohlc   = ohlc;
+      m.price  = q.price;
+      m.chgPct = q.prevClose > 0 ? (q.price-q.prevClose)/q.prevClose*100 : m.chgPct;
+      const edge = calcEdge(m.sym, ohlc);
+      edge.smoothedScore   = edge.score;
+      edge.smoothedSignals = {...edge.signals};
+      edge.isLive = true;
+      m.edge = edge;
+      loaded++;
+    }
+    // 500ms between requests → stays well under 60 calls/min free tier limit
+    await new Promise(r => setTimeout(r, 500));
+  }
 
   // Unmapped markets stay simulated
   S.markets.filter(m => !FINNHUB_MAP[m.sym.id]).forEach(m => {
