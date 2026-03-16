@@ -249,10 +249,10 @@ button{cursor:pointer;font-family:inherit;transition:all .15s}
   </div>
   <div class="h-right">
     <div class="api-wrap">
-      <input type="text" id="api-input" placeholder="Finnhub API key (optional)…">
+      <input type="text" id="api-input" placeholder="Twelve Data API key (twelvedata.com)…">
       <button class="api-set-btn" onclick="saveApiKey()">SET</button>
     </div>
-    <a href="https://finnhub.io/register" target="_blank" style="font-size:9px;color:var(--blue);text-decoration:none;white-space:nowrap">Free Key →</a>
+    <a href="https://twelvedata.com/register" target="_blank" style="font-size:9px;color:var(--blue);text-decoration:none;white-space:nowrap">Free Key →</a>
     <button class="btn-topstep" onclick="exportPDF()">📄 PDF Export</button>
   </div>
 </div>
@@ -1915,128 +1915,108 @@ async function exportPDF(){
   toast('PDF Exported','Daily report saved successfully','var(--topstep)');
 }
 
-// ═══ API KEY + FINNHUB LIVE DATA ══════════════════
-// 
-// Finnhub FREE tier reality check:
-// ✅ /quote endpoint → works for ALL symbols (forex, crypto, stocks)
-// ❌ /forex/candle  → requires Premium plan
-// ❌ /crypto/candle → requires Premium plan
-//
-// Our approach: use /quote to get live prices, build our own
-// OHLC history by appending quotes over time + seed with realistic
-// simulated history. Edge Score runs on real prices.
+// ═══ LIVE DATA — TWELVE DATA API ══════════════════
+// twelvedata.com — 800 free credits/day
+// ✅ Forex (EUR/USD, GBP/USD stb.)
+// ✅ Crypto (BTC/USD, ETH/USD)
+// ✅ Commodities (XAU/USD gold, XAG/USD silver)
+// ✅ Indices (SPX500 stb.)
+// API key from: twelvedata.com/register (free)
 
-const FINNHUB_MAP = {
-  // Forex — OANDA (quote works on free tier)
-  'EUR/USD': 'OANDA:EUR_USD',
-  'GBP/USD': 'OANDA:GBP_USD',
-  'USD/JPY': 'OANDA:USD_JPY',
-  'USD/CHF': 'OANDA:USD_CHF',
-  'AUD/USD': 'OANDA:AUD_USD',
-  'USD/CAD': 'OANDA:USD_CAD',
-  'EUR/GBP': 'OANDA:EUR_GBP',
-  'GBP/JPY': 'OANDA:GBP_JPY',
-  'EUR/JPY': 'OANDA:EUR_JPY',
-  'NZD/USD': 'OANDA:NZD_USD',
-  'XAU/USD': 'OANDA:XAU_USD',
-  'XAG/USD': 'OANDA:XAG_USD',
-  'SPX500':  'OANDA:SPX500USD',
-  // Crypto — Binance (quote works on free tier)
-  'BTC/USD': 'BINANCE:BTCUSDT',
-  'ETH/USD': 'BINANCE:ETHUSDT',
-  // Futures/Commodities — NOT available on free tier
-  // These stay simulated
+const TD_SYMBOLS = {
+  'EUR/USD': 'EUR/USD',
+  'GBP/USD': 'GBP/USD',
+  'USD/JPY': 'USD/JPY',
+  'USD/CHF': 'USD/CHF',
+  'AUD/USD': 'AUD/USD',
+  'USD/CAD': 'USD/CAD',
+  'EUR/GBP': 'EUR/GBP',
+  'GBP/JPY': 'GBP/JPY',
+  'EUR/JPY': 'EUR/JPY',
+  'NZD/USD': 'NZD/USD',
+  'XAU/USD': 'XAU/USD',
+  'XAG/USD': 'XAG/USD',
+  'BTC/USD': 'BTC/USD',
+  'ETH/USD': 'ETH/USD',
+  // Futures/indices — simulated (require exchange subscription)
 };
 
-// Test if the API key works — checks response shape, not price value
-// (price can be 0 when market is closed — that's still a valid key!)
+// ── Twelve Data API functions ──────────────────────
+
+// Test API key with a quick EUR/USD price fetch
 async function testApiKey(key){
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+    const res = await fetch(
+      `https://api.twelvedata.com/price?symbol=EUR/USD&apikey=${key}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if(!res.ok) return { ok:false, reason:`HTTP ${res.status}` };
+    const data = await res.json();
+    if(data.status === 'error') return { ok:false, reason: data.message || 'Invalid API key' };
+    if(!data.price) return { ok:false, reason:'No price in response — check API key' };
+    return { ok:true, price: parseFloat(data.price).toFixed(5) };
+  } catch(e){
+    if(e.name==='AbortError') return { ok:false, reason:'Timeout — check internet connection' };
+    return { ok:false, reason: e.message || 'Network error' };
+  }
+}
+
+// Fetch a single live quote from Twelve Data
+async function fetchTDQuote(symId){
+  const tdSym = TD_SYMBOLS[symId];
+  if(!tdSym || !S.apiKey) return null;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6000);
     const res = await fetch(
-      `https://finnhub.io/api/v1/quote?symbol=OANDA:EUR_USD&token=${key}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timer);
-    if(res.status === 401 || res.status === 403)
-      return { ok:false, reason:'Invalid API key (401/403)' };
-    if(res.status === 429)
-      return { ok:false, reason:'Rate limit hit — wait 1 min and retry' };
-    if(!res.ok)
-      return { ok:false, reason:`HTTP error ${res.status}` };
-    const data = await res.json();
-    if(data.error)
-      return { ok:false, reason: data.error };
-    // Valid response shape — even c:0 means market is closed but key works
-    if(typeof data.c !== 'number' && typeof data.pc !== 'number')
-      return { ok:false, reason:'Unexpected response format' };
-    const displayPrice = data.c || data.pc || '(market closed)';
-    return { ok:true, price: displayPrice };
-  } catch(e){
-    if(e.name === 'AbortError')
-      return { ok:false, reason:'Request timed out (6s) — check internet connection' };
-    return { ok:false, reason: e.message || 'Network error — check CORS/connection' };
-  }
-}
-
-// Fetch a single live quote — returns null only on real errors, not on market-closed
-async function fetchFinnhubQuote(symId){
-  const fSym = FINNHUB_MAP[symId];
-  if(!fSym || !S.apiKey) return null;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(
-      `https://finnhub.io/api/v1/quote?symbol=${fSym}&token=${S.apiKey}`,
+      `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(tdSym)}&apikey=${S.apiKey}`,
       { signal: controller.signal }
     );
     clearTimeout(timer);
     if(!res.ok) return null;
     const data = await res.json();
-    if(data.error || typeof data.c !== 'number') return null;
-    // If market is closed, use prevClose as current price (still useful!)
-    const price = data.c > 0 ? data.c : (data.pc > 0 ? data.pc : null);
-    if(!price) return null;
-    return {
-      price,
-      open:      data.o  > 0 ? data.o  : price,
-      high:      data.h  > 0 ? data.h  : price,
-      low:       data.l  > 0 ? data.l  : price,
-      prevClose: data.pc > 0 ? data.pc : price,
-      marketOpen: data.c > 0,
-    };
+    if(data.status === 'error' || !data.close) return null;
+    const price    = parseFloat(data.close);
+    const open     = parseFloat(data.open)           || price;
+    const high     = parseFloat(data.high)           || price;
+    const low      = parseFloat(data.low)            || price;
+    const prevClose= parseFloat(data.previous_close) || price;
+    if(!price || isNaN(price)) return null;
+    return { price, open, high, low, prevClose };
   } catch(e){ return null; }
 }
 
-// Load live data: validate key, then fetch quotes for all mapped symbols
+// Load all live quotes on startup/key change
 async function loadLiveData(){
   if(!S.apiKey){ setApiStatus('sim'); return false; }
   setApiStatus('loading');
 
-  // ── Step 1: Validate key ──────────────────────────
+  // Step 1: Validate key
   const test = await testApiKey(S.apiKey);
   if(!test.ok){
     setApiStatus('error');
-    toast('API Key Problem', test.reason, 'var(--red)');
-    console.error('[FundedEdge] Finnhub test failed:', test.reason);
+    toast('API Key Hiba', test.reason, 'var(--red)');
+    console.error('[FundedEdge] Twelve Data test failed:', test.reason);
     return false;
   }
+  toast('API Key Valid ✓', `EUR/USD: ${test.price}`, 'var(--green)');
 
-  const marketStatus = test.marketOpen === false ? ' (market closed — using last price)' : '';
-  toast('API Key Valid ✓', `EUR/USD: ${test.price}${marketStatus}`, 'var(--green)');
-
-  // ── Step 2: Fetch quotes sequentially (avoid rate limit) ─
-  const mappedMarkets = S.markets.filter(m => FINNHUB_MAP[m.sym.id]);
+  // Step 2: Load quotes sequentially (8 credits/min limit on free tier)
+  const mappedMarkets = S.markets.filter(m => TD_SYMBOLS[m.sym.id]);
   let loaded = 0;
 
   for(const m of mappedMarkets){
-    const q = await fetchFinnhubQuote(m.sym.id);
+    const q = await fetchTDQuote(m.sym.id);
     if(q){
+      // Scale the simulated OHLC history to anchor at real price
       const scale = q.price / (m.ohlc.at(-1)?.c || q.price);
       const ohlc  = m.ohlc.map(bar => ({
         o:bar.o*scale, h:bar.h*scale, l:bar.l*scale, c:bar.c*scale, v:bar.v
       }));
+      // Replace last bar with real data
       ohlc[ohlc.length-1] = { o:q.open, h:q.high, l:q.low, c:q.price, v:500000 };
       m.sym    = {...m.sym, base:q.price};
       m.ohlc   = ohlc;
@@ -2049,12 +2029,12 @@ async function loadLiveData(){
       m.edge = edge;
       loaded++;
     }
-    // 500ms between requests → stays well under 60 calls/min free tier limit
-    await new Promise(r => setTimeout(r, 500));
+    // 800ms between requests — stays under 8 credits/min free limit
+    await new Promise(r => setTimeout(r, 800));
   }
 
-  // Unmapped markets stay simulated
-  S.markets.filter(m => !FINNHUB_MAP[m.sym.id]).forEach(m => {
+  // Unmapped markets (futures) stay simulated
+  S.markets.filter(m => !TD_SYMBOLS[m.sym.id]).forEach(m => {
     m.edge = {...m.edge, isLive:false};
   });
 
@@ -2063,62 +2043,61 @@ async function loadLiveData(){
 
   const simCount = S.markets.length - loaded;
   setApiStatus('partial', loaded, mappedMarkets.length);
-  toast(`Live: ${loaded}/${mappedMarkets.length} symbols`,
-    `${simCount} futures/commodities: simulated (Finnhub free tier)`,
+  toast(`Live: ${loaded}/${mappedMarkets.length} szimbólum`,
+    `${simCount} futures szimulált (nincs free tier adat)`,
     'var(--topstep)');
   return true;
 }
 
-// Periodic refresh: fetch fresh quotes for live symbols
+// Periodic refresh: update live prices (respects 8 credits/min)
 async function refreshLivePrices(){
   if(!S.apiKey) return;
-  const mapped = S.markets.filter(m => FINNHUB_MAP[m.sym.id]);
+  // Only refresh 3 symbols per cycle to stay within rate limits
+  const mapped = S.markets.filter(m => TD_SYMBOLS[m.sym.id]);
+  const idx    = S.liveRefreshIdx % mapped.length;
+  const slice  = mapped.slice(idx, idx + 3);
+  S.liveRefreshIdx = (idx + 3) % mapped.length;
 
-  await Promise.all(mapped.map(async m => {
-    const q = await fetchFinnhubQuote(m.sym.id);
-    if(!q) return;
-
-    const ohlc = [...m.ohlc];
-    // Append a new bar with real price
-    const prev = ohlc.at(-1);
-    ohlc.push({
-      o: prev.c,
-      h: Math.max(prev.c, q.price, q.high || q.price),
-      l: Math.min(prev.c, q.price, q.low  || q.price),
-      c: q.price,
-      v: 100000,
-    });
-    if(ohlc.length > 300) ohlc.shift();
-
-    const pChg = Math.abs((q.price - m.price) / m.price) * 100;
-    const prevEdge = m.edge;
-    let newEdge;
-    if(pChg >= 0.002){
-      const raw = calcEdge(m.sym, ohlc);
-      const sm  = smoothScore(raw.score, prevEdge.smoothedScore);
-      const ss  = smoothSignals(raw.signals, prevEdge.smoothedSignals);
-      newEdge = { ...raw, score:sm, signals:ss, smoothedScore:sm,
-        smoothedSignals:ss, prevSmoothedScore:prevEdge.score, isLive:true };
-    } else {
-      newEdge = { ...prevEdge, prevSmoothedScore:prevEdge.score, isLive:true };
+  for(const m of slice){
+    const q = await fetchTDQuote(m.sym.id);
+    if(q){
+      const ohlc = [...m.ohlc];
+      const prev = ohlc.at(-1);
+      ohlc.push({
+        o:prev.c,
+        h:Math.max(prev.c, q.price, q.high),
+        l:Math.min(prev.c, q.price, q.low),
+        c:q.price, v:100000
+      });
+      if(ohlc.length>300) ohlc.shift();
+      const pChg = Math.abs((q.price-m.price)/m.price)*100;
+      const prevEdge = m.edge;
+      let newEdge;
+      if(pChg>=0.002){
+        const raw=calcEdge(m.sym,ohlc);
+        const sm=smoothScore(raw.score,prevEdge.smoothedScore);
+        const ss=smoothSignals(raw.signals,prevEdge.smoothedSignals);
+        newEdge={...raw,score:sm,signals:ss,smoothedScore:sm,
+          smoothedSignals:ss,prevSmoothedScore:prevEdge.score,isLive:true};
+      } else {
+        newEdge={...prevEdge,prevSmoothedScore:prevEdge.score,isLive:true};
+      }
+      m.price  = q.price;
+      m.chgPct = q.prevClose?(q.price-q.prevClose)/q.prevClose*100:m.chgPct;
+      m.edge   = newEdge;
+      m.ohlc   = ohlc;
     }
-    m.price  = q.price;
-    m.chgPct = q.prevClose ? (q.price-q.prevClose)/q.prevClose*100 : m.chgPct;
-    m.edge   = newEdge;
-    m.ohlc   = ohlc;
-  }));
-
-  // Tick sim markets too
+    await new Promise(r=>setTimeout(r,500));
+  }
   refreshSimMarkets();
 }
 
-// Simulated tick for futures/commodities (no free Finnhub data)
+// Simulated tick for futures (NQ, ES, YM etc. — no free data)
 function refreshSimMarkets(){
   S.markets.forEach(m => {
     if(m.edge?.isLive) return;
-    const ohlc = [...m.ohlc];
-    const lp   = ohlc.at(-1);
-    const nc   = lp.c*(1+(Math.random()-0.487)*2*m.sym.vol);
+    const ohlc=[...m.ohlc], lp=ohlc.at(-1);
+    const nc=lp.c*(1+(Math.random()-0.487)*2*m.sym.vol);
     ohlc.push({o:lp.c,h:Math.max(lp.c,nc)*(1+Math.random()*m.sym.vol*.3),
       l:Math.min(lp.c,nc)*(1-Math.random()*m.sym.vol*.3),c:nc,v:Math.floor(rand(200000,2000000))});
     if(ohlc.length>250) ohlc.shift();
@@ -2134,12 +2113,10 @@ function refreshSimMarkets(){
     } else {
       newEdge={...prev,prevSmoothedScore:prev.score,isLive:false};
     }
-    m.price=nc;
-    m.chgPct=(nc-ohlc[0].c)/ohlc[0].c*100;
+    m.price=nc; m.chgPct=(nc-ohlc[0].c)/ohlc[0].c*100;
     m.edge=newEdge; m.ohlc=ohlc;
   });
-  renderScanner();
-  renderTopstepBar();
+  renderScanner(); renderTopstepBar();
   if(S.selected){const m=S.markets.find(x=>x.sym.id===S.selected);if(m)renderDetail(m);}
 }
 
@@ -2158,7 +2135,6 @@ async function saveApiKey(){
   S.apiKey  = key;
   localStorage.setItem('fe_apikey', key);
   if(!key){ setApiStatus('sim'); return; }
-  // Immediately try to load live data
   await loadLiveData();
 }
 
